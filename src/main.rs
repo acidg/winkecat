@@ -1,29 +1,46 @@
-use std::{process::Command, sync::{atomic::{AtomicUsize, Ordering}, Arc}, thread, time::Duration};
-
+use std::{
+    fs::read,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
+use openssl::ec::EcKey;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
-fn main() {
-    let charset = "egmqrABINO9=";
-    let word_length = 8;
+const CONFIG_PATH: &str = "../privatekey.pem";
 
-    let iterator = WordIterator::new(charset, word_length);
+fn main() {
+    const CHARSET: &str = "egmqrABINO09=";
+    const WORD_LENGTH: usize = 8;
+
+    // Read the encrypted data from the file
+    let confg_file = read(CONFIG_PATH).unwrap();
+
+    // Iterator to generate password combinations
+    let iterator = WordIterator::new(CHARSET, WORD_LENGTH);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = Arc::clone(&counter);
 
-    // Start a thread to report performance
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(1));
-        let count = counter_clone.swap(0, Ordering::Relaxed);
-        println!("Rate: {} passwords/sec", count);
+    // Spawn a thread for monitoring performance
+    thread::spawn(move || {
+        let total: u64 = 0;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            let count = counter_clone.swap(0, Ordering::Relaxed);
+            println!("Elapsed: {}, Rate: {} passwords/sec", total, count);
+        }
     });
 
+    // Search for the correct password
     let found = iterator
-        .par_bridge() // Nutzt Rayon, um die Iteration zu parallelisieren
+        .par_bridge() // Parallelized iteration using Rayon
         .find_any(|password| {
             counter.fetch_add(1, Ordering::Relaxed);
-            // println!("Trying {}", password);
-            if test_password(password.as_str()) {
+            if test_password(&confg_file, password.as_str()) {
                 println!("Found password: {}", password);
                 true
             } else {
@@ -32,39 +49,25 @@ fn main() {
         });
 
     match found {
-        Some(password) => println!("Password gefunden: {}", password),
+        Some(password) => println!("Password found: {}", password),
         None => println!("Exhausted all possibilities. No password found."),
     }
-
-    println!("Exhausted all possibilities. No password found.");
 }
 
-fn test_password(password: &str) -> bool {
-    let output = Command::new("openssl")
-        .arg("ec")
-        .arg("-in")
-        .arg("../openvpn.config")
-        .arg("-out")
-        .arg("decrypted.key")
-        .arg("-passin")
-        .arg(format!("pass:{}", password))
-        // .stdout(Stdio::inherit())
-        // .stderr(Stdio::inherit())
-        .output();
-
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                return true;
-            }
+fn test_password(confg_file: &Vec<u8>, password: &str) -> bool {
+    match EcKey::private_key_from_pem_passphrase(&confg_file, password.as_bytes()) {
+        Ok(_) => {
+            return true;
         }
         Err(e) => {
-            eprintln!("Error executing command: {}", e);
+            if e.errors()[0].reason() == Some("bad decrypt") {
+                return false;
+            }
             return false;
-        }
+        }, // Password was incorrect
     }
-    return false;
 }
+
 struct WordIterator {
     charset: Vec<char>,
     current: Vec<usize>,
