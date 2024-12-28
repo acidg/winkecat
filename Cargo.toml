@@ -1,0 +1,9 @@
+[package]
+name = "cracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.95"
+openssl = "0.10.68"
+rayon = "1.10.0"
