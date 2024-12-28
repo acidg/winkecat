@@ -8,40 +8,35 @@ use std::{
     time::Duration,
 };
 use openssl::ec::EcKey;
-use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::prelude::*;
 
 const CONFIG_PATH: &str = "../privatekey.pem";
+const CHARSET: &[u8] = b"egmqrABINO09=";
+const WORD_LENGTH: usize = 8;
 
 fn main() {
-    const CHARSET: &str = "egmqrABINO09=";
-    const WORD_LENGTH: usize = 8;
-
-    // Read the encrypted data from the file
-    let confg_file = read(CONFIG_PATH).unwrap();
-
-    // Iterator to generate password combinations
-    let iterator = WordIterator::new(CHARSET, WORD_LENGTH);
+    let confg_file = read(CONFIG_PATH).expect("Failed to read config file");
 
     let counter = Arc::new(AtomicUsize::new(0));
-    let counter_clone = Arc::clone(&counter);
 
     // Spawn a thread for monitoring performance
+    let counter_clone = Arc::clone(&counter);
     thread::spawn(move || {
-        let total: u64 = 0;
         loop {
             thread::sleep(Duration::from_secs(1));
             let count = counter_clone.swap(0, Ordering::Relaxed);
-            println!("Elapsed: {}, Rate: {} passwords/sec", total, count);
+            println!("Rate: {} passwords/sec", count);
         }
     });
 
-    // Search for the correct password
-    let found = iterator
-        .par_bridge() // Parallelized iteration using Rayon
-        .find_any(|password| {
+    // Use Rayon to parallelize password search
+    let found = (0..CHARSET.len().pow(WORD_LENGTH as u32))
+        .into_par_iter()
+        .find_any(|&index| {
+            let password = generate_password(index, CHARSET, WORD_LENGTH);
             counter.fetch_add(1, Ordering::Relaxed);
-            if test_password(&confg_file, password.as_str()) {
-                println!("Found password: {}", password);
+            if EcKey::private_key_from_pem_passphrase(&confg_file, &password).is_ok() {
+                println!("Found password: {}", String::from_utf8(password).unwrap());
                 true
             } else {
                 false
@@ -49,67 +44,21 @@ fn main() {
         });
 
     match found {
-        Some(password) => println!("Password found: {}", password),
+        Some(_) => println!("Password search completed."),
         None => println!("Exhausted all possibilities. No password found."),
     }
 }
 
-fn test_password(confg_file: &Vec<u8>, password: &str) -> bool {
-    match EcKey::private_key_from_pem_passphrase(&confg_file, password.as_bytes()) {
-        Ok(_) => {
-            return true;
-        }
-        Err(e) => {
-            if e.errors()[0].reason() == Some("bad decrypt") {
-                return false;
-            }
-            return false;
-        }, // Password was incorrect
+// Generate a password string from an index
+fn generate_password(index: usize, charset: &[u8], length: usize) -> Vec<u8> {
+    let mut password = vec![0u8; length];
+    let base = charset.len();
+    let mut idx = index;
+
+    for i in (0..length).rev() {
+        password[i] = charset[idx % base];
+        idx /= base;
     }
-}
 
-struct WordIterator {
-    charset: Vec<char>,
-    current: Vec<usize>,
-    length: usize,
-    finished: bool,
-}
-
-impl WordIterator {
-    pub fn new(charset: &str, length: usize) -> Self {
-        Self {
-            charset: charset.chars().collect(),
-            current: vec![0; length],
-            length,
-            finished: false,
-        }
-    }
-}
-
-impl Iterator for WordIterator {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
-
-        // Construct the current word
-        let word: String = self.current.iter().map(|&i| self.charset[i]).collect();
-
-        // Update the current state
-        for i in (0..self.length).rev() {
-            if self.current[i] + 1 < self.charset.len() {
-                self.current[i] += 1;
-                break;
-            } else {
-                self.current[i] = 0;
-                if i == 0 {
-                    self.finished = true;
-                }
-            }
-        }
-
-        Some(word)
-    }
+    return password;
 }
